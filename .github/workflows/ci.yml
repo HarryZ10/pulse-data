@@ -10,14 +10,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-
-      - name: Build an image from Dockerfile
-        run: |
-          docker-compose -f docker-compose.yaml -f docker-compose.admin-panel.yaml up
-          docker-compose -f docker-compose.yaml -f docker-compose.application-data-import.yaml up
-          docker-compose -f docker-compose.yaml -f docker-compose.case-triage.test.yaml up
-          docker-compose -f docker-compose.yaml -f docker-compose.justice-counts.yaml up
-
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
