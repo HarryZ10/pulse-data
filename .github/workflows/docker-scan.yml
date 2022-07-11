@@ -1,8 +1,14 @@
 name: Docker CI
 
 on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
   schedule:
-    - cron: '0 15 * * *'
+    - cron: '0 15 * * *' # every day at 15:00 UTC (8:00 AM Pacific)
 
 jobs:
   build:
@@ -25,3 +31,24 @@ jobs:
         uses: github/codeql-action/upload-sarif@v2
         with:
           sarif_file: 'trivy-results.sarif'
+
+  dockle:
+    name: Dockle Container Analysis
+    runs-on: ubuntu-latest
+    steps:
+       # Makes sure your .dockleignore file is available to the next step
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Run Dockle
+        uses: erzz/dockle-action@v1
+        with:
+          image: 'us.gcr.io/recidiviz-staging/appengine/default:latest'
+          exit-code: 1
+          failure-threshold: fatal
+      - name: Upload Report
+        uses: actions/upload-artifact@v2
+        if: always()
+        with:
+          name: Dockle Report
+          path: dockle-report.json
