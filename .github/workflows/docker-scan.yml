@@ -36,7 +36,7 @@ jobs:
           image: 'us.gcr.io/recidiviz-staging/appengine/default:latest'
           exit-code: 1
           failure-threshold: fatal
-          format-output: 'sarif'
+          report-format: 'sarif'
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v2
         with:
