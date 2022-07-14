@@ -34,8 +34,6 @@ jobs:
         uses: erzz/dockle-action@v1
         with:
           image: 'us.gcr.io/recidiviz-staging/appengine/default:latest'
-          exit-code: 1
-          failure-threshold: fatal
           report-format: 'sarif'
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v2
