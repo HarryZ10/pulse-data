@@ -32,7 +32,7 @@ jobs:
         with:
           image: 'us.gcr.io/recidiviz-staging/appengine/default:latest'
           report-format: sarif
-          report-name: docker-report
+          report-name: dockle-report
           dockle-version: 0.3.16
           accept-extensions: pem
       - name: Upload SARIF file
