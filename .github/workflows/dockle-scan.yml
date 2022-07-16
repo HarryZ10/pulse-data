@@ -21,10 +21,11 @@ jobs:
         uses: erzz/dockle-action@v1
         with:
           image: 'us.gcr.io/recidiviz-staging/appengine/default:latest'
-          report-format: sarif
+          report-format: json
           report-name: dockle-report
-      - name: Upload SARIF file
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload Report
+        uses: actions/upload-artifact@v2
+        if: always()
         with:
-          # Path to SARIF file relative to the root of the repository
-          sarif_file: dockle-report.sarif
+          name: Dockle Report
+          path: dockle-report.json
