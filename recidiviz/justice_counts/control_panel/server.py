@@ -43,7 +43,9 @@ os.environ.setdefault("APP_URL", "http://localhost:3000")
 def get_blueprints_for_justice_counts_documentation() -> List[Tuple[Blueprint, str]]:
     return [
         (
-            get_api_blueprint(auth_decorator=passthrough_authorization_decorator()),
+            get_api_blueprint(
+                auth_decorator=passthrough_authorization_decorator(), auth0_client=None
+            ),
             "/justice_counts/api",
         ),
         (
@@ -84,7 +86,9 @@ def create_app(config: Optional[Config] = None) -> Flask:
     )
     app.register_blueprint(
         get_api_blueprint(
-            auth_decorator=config.AUTH_DECORATOR, secret_key=app.secret_key
+            auth_decorator=config.AUTH_DECORATOR,
+            auth0_client=config.AUTH0_CLIENT,
+            secret_key=app.secret_key,
         ),
         url_prefix="/api",
     )
@@ -121,8 +125,8 @@ def create_app(config: Optional[Config] = None) -> Flask:
             response.headers[
                 "Strict-Transport-Security"
             ] = "max-age=63072000; includeSubDomains"  # max age of 2 years
-        response.headers["Content-Security-Policy-Report-Only"] = (
-            "default-src 'self' *.run.app https://recidiviz-justice-counts-staging.us.auth0.com;"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self' *.run.app https://recidiviz-justice-counts-staging.us.auth0.com https://recidiviz-justice-counts.us.auth0.com;"
             "object-src 'none'; "
             "img-src * data:; "
             # TODO(#13507) Replace unsafe-inline with a nonce

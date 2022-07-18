@@ -21,8 +21,10 @@ from http import HTTPStatus
 import pytest
 from flask import g, session
 from freezegun import freeze_time
+from mock import patch
 from sqlalchemy.engine import Engine
 
+from recidiviz.auth.auth0_client import JusticeCountsAuth0AppMetadata
 from recidiviz.common.constants.justice_counts import ContextKey
 from recidiviz.justice_counts.control_panel.config import Config
 from recidiviz.justice_counts.control_panel.constants import ControlPanelPermission
@@ -58,11 +60,22 @@ class TestJusticeCountsControlPanelAPI(JusticeCountsDatabaseTestCase):
     """Implements tests for the Justice Counts Control Panel backend API."""
 
     def setUp(self) -> None:
+        self.client_patcher = patch("recidiviz.auth.auth0_client.Auth0")
+        self.test_auth0_client = self.client_patcher.start().return_value
+        self.secrets_patcher = patch("recidiviz.auth.auth0_client.secrets")
+        self.mock_secrets = self.secrets_patcher.start()
+        self.secrets = {
+            "auth0_api_domain": "fake_api_domain",
+            "auth0_api_client_id": "fake client id",
+            "auth0_api_client_secret": "fake client secret",
+        }
+        self.mock_secrets.get_secret.side_effect = self.secrets.get
         test_config = Config(
             DB_URL=local_postgres_helpers.on_disk_postgres_db_url(),
             WTF_CSRF_ENABLED=False,
             AUTH_DECORATOR=passthrough_authorization_decorator(),
             AUTH0_CONFIGURATION=get_test_auth0_config(),
+            AUTH0_CLIENT=self.test_auth0_client,
         )
         self.app = create_app(config=test_config)
         self.client = self.app.test_client()
@@ -225,83 +238,23 @@ class TestJusticeCountsControlPanelAPI(JusticeCountsDatabaseTestCase):
 
         self.assertEqual(response.status_code, HTTPStatus.UNAUTHORIZED)
 
-    def test_create_user(self) -> None:
-        email_address = "user@gmail.com"
-        agency_name = "Agency Alpha"
-        name = "John Doe"
-        system = "CORRECTIONS"
-        state_code = "us_ca"
-        fips_county_code = "us_ca_sacramento"
-        agency = Agency(
-            name=agency_name,
-            id=1,
-            system=system,
-            state_code=state_code,
-            fips_county_code=fips_county_code,
-        )
+    def test_create_user_if_necessary(self) -> None:
+        name = self.test_schema_objects.test_user_A.name
+        auth0_user_id = self.test_schema_objects.test_user_A.auth0_user_id
+        agency = self.test_schema_objects.test_agency_A
         self.session.add(agency)
-
-        with self.app.test_request_context():
-            auth0_user_id = "12345abc"
-            g.user_context = UserContext(
-                auth0_user_id=auth0_user_id,
-                agency_ids=[agency.id],
-            )
-            admin_response = self.client.post(
-                "/api/users",
-                json={
-                    "email_address": email_address,
-                    "name": name,
-                },
-            )
-        self.assertEqual(admin_response.status_code, 200)
-        response_json = assert_type(admin_response.json, dict)
-        self.assertEqual(
-            response_json["agencies"],
-            [
-                {
-                    "fips_county_code": fips_county_code,
-                    "id": 1,
-                    "name": agency_name,
-                    "system": system,
-                    "systems": [],
-                    "state_code": state_code,
-                }
-            ],
-        )
-        self.assertEqual(response_json["email_address"], email_address)
-        self.assertEqual(response_json["auth0_user_id"], None)
-        self.assertEqual(response_json["name"], name)
-        self.assertEqual(response_json["permissions"], [])
-        db_item = self.session.query(UserAccount).one_or_none()
-        self.assertEqual(db_item.to_json(agencies=[agency]), response_json)
-
-    def test_update_user(self) -> None:
-        agency_name = "Agency Alpha"
-        system = "CORRECTIONS"
-        state_code = "us_ca"
-        fips_county_code = "us_ca_sacramento"
-        email_address = "user@gmail.com"
-        agency = Agency(
-            name=agency_name,
-            id=1,
-            system=system,
-            state_code=state_code,
-            fips_county_code=fips_county_code,
-        )
-        user_account = UserAccount(id=1, name="Jane Doe", email_address=email_address)
-        self.session.add_all([agency, user_account])
         self.session.commit()
 
         with self.app.test_request_context():
-            auth0_user_id = "12345abc"
             g.user_context = UserContext(
                 auth0_user_id=auth0_user_id,
                 agency_ids=[agency.id],
             )
             user_response = self.client.post(
                 "/api/users",
-                json={"email_address": email_address, "auth0_user_id": auth0_user_id},
+                json={
+                    "name": name,
+                },
             )
 
         self.assertEqual(user_response.status_code, 200)
@@ -310,21 +263,59 @@ class TestJusticeCountsControlPanelAPI(JusticeCountsDatabaseTestCase):
             response_json["agencies"],
             [
                 {
-                    "fips_county_code": fips_county_code,
-                    "id": 1,
-                    "name": agency_name,
-                    "system": system,
+                    "fips_county_code": agency.fips_county_code,
+                    "id": agency.id,
+                    "name": agency.name,
+                    "system": agency.system.value,
                     "systems": [],
-                    "state_code": state_code,
+                    "state_code": agency.state_code,
                 }
             ],
         )
-        self.assertEqual(response_json["email_address"], email_address)
-        self.assertEqual(response_json["auth0_user_id"], auth0_user_id)
-        self.assertEqual(response_json["name"], "Jane Doe")
         self.assertEqual(response_json["permissions"], [])
-        db_item = self.session.query(UserAccount).one_or_none()
-        self.assertEqual(db_item.to_json(agencies=[agency]), response_json)
+        # New user is added to the database
+        db_item = self.session.query(UserAccount).one()
+        self.assertEqual(db_item.name, name)
+        self.assertEqual(db_item.auth0_user_id, auth0_user_id)
+
+    def test_update_user_name_and_email(self) -> None:
+        new_email_address = "newuser@fake.com"
+        new_name = "NEW NAME"
+        auth0_user = self.test_schema_objects.test_auth0_user
+        db_user = self.test_schema_objects.test_user_A
+        self.session.add_all([self.test_schema_objects.test_agency_A, db_user])
+        self.session.commit()
+        agency = self.session.query(Agency).one_or_none()
+        auth0_user["name"] = new_name
+        auth0_user["email"] = new_email_address
+        auth0_user["app_metadata"] = JusticeCountsAuth0AppMetadata(
+            agency_ids=[agency.id], has_seen_onboarding={}
+        )
+        self.test_auth0_client.update_user_name_and_email.return_value = auth0_user
+        with self.app.test_request_context():
+            g.user_context = UserContext(
+                auth0_user_id=auth0_user["user_id"], user_account=db_user
+            )
+            response = self.client.post(
+                "/api/users/update",
+                json={
+                    "name": new_name,
+                    "email": new_email_address,
+                    "auth0_user_id": auth0_user.get("id"),
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.test_auth0_client.update_user_name_and_email.assert_called_once_with(
+            user_id=auth0_user.get("user_id"),
+            name=new_name,
+            email=new_email_address,
+            email_verified=False,
+        )
+        self.test_auth0_client.send_verification_email.assert_called_once_with(
+            user_id=auth0_user.get("user_id")
+        )
+        db_user = self.session.query(UserAccount).one()
+        self.assertEqual(db_user.name, new_name)
 
     def test_update_report(self) -> None:
         update_datetime = datetime.datetime(2022, 2, 1, 0, 0, 0)
@@ -334,8 +325,8 @@ class TestJusticeCountsControlPanelAPI(JusticeCountsDatabaseTestCase):
             self.session.add_all([user, report])
             self.session.commit()
             with self.app.test_request_context():
-                user_account = UserAccountInterface.get_user_by_email_address(
-                    session=self.session, email_address=user.email_address
+                user_account = UserAccountInterface.get_user_by_auth0_user_id(
+                    session=self.session, auth0_user_id=user.auth0_user_id
                 )
                 g.user_context = UserContext(
                     auth0_user_id=user.auth0_user_id,
@@ -464,7 +455,7 @@ class TestJusticeCountsControlPanelAPI(JusticeCountsDatabaseTestCase):
             user_response = self.client.post(
                 "/api/users",
                 json={
-                    "email_address": user_account.email_address,
+                    "name": user_account.name,
                     "auth0_user_id": user_account.auth0_user_id,
                 },
             )

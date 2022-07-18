@@ -101,7 +101,7 @@ def raise_if_user_is_unauthorized(route: Callable) -> Callable:
         if not agency_id and "report_id" in kwargs:
             report_id: int = kwargs["report_id"]  # type: ignore[assignment]
             report = ReportInterface.get_report_by_id(
-                session=current_session, report_id=report_id
+                session=current_session, report_id=report_id, include_datapoints=False
             )
             agency_id = report.source_id
 
@@ -141,6 +141,25 @@ def get_user_account_id(request_dict: Dict[str, Any]) -> int:
         raise ValueError("Missing required parameter user_id.")
 
     return user_id
+
+
+def get_auth0_user_id(request_dict: Dict[str, Any]) -> str:
+    """If we are not in development, we do not allow passing in `auth0_user_id` to a request.
+    Doing so would allow users to pretend to be other users. Instead, we infer the `auth0_user_id`
+    from the Authorization header and store it on the global user context in our authorization
+    callback. If we are in development, we do allow passing in `auth0_user_id` for testing purposes.
+    """
+    if "user_context" in g and g.user_context.auth0_user_id is not None:
+        return g.user_context.auth0_user_id
+
+    if not in_development():
+        raise ValueError("No UserContext was found on the session.")
+
+    auth0_user_id = request_dict.get("auth0_user_id")
+    if auth0_user_id is None:
+        raise ValueError("Missing required parameter auth0_user_id.")
+
+    return auth0_user_id
 
 
 def get_agency_ids_from_token(claims: TokenClaims) -> Any:

@@ -17,11 +17,11 @@
 """Direct ingest controller implementation for US_CO."""
 from typing import List
 
-from recidiviz.cloud_storage.gcsfs_path import GcsfsBucketPath
 from recidiviz.common.constants.states import StateCode
 from recidiviz.ingest.direct.controllers.base_direct_ingest_controller import (
     BaseDirectIngestController,
 )
+from recidiviz.ingest.direct.types.direct_ingest_instance import DirectIngestInstance
 
 
 class UsCoController(BaseDirectIngestController):
@@ -31,15 +31,15 @@ class UsCoController(BaseDirectIngestController):
     def region_code(cls) -> str:
         return StateCode.US_CO.value.lower()
 
-    def __init__(self, ingest_bucket_path: GcsfsBucketPath):
-        super().__init__(ingest_bucket_path)
+    def __init__(self, ingest_instance: DirectIngestInstance):
+        super().__init__(ingest_instance)
 
     def get_ingest_view_rank_list(self) -> List[str]:
         """Returns a list of string ingest view names in the order they should be
         processed for data we received on a particular date.
         """
 
-        tags = ["StatePerson"]
+        tags = ["StatePerson", "IncarcerationPeriod"]
 
         # Add ingest view names to this list as you add mappings for them.
         return tags

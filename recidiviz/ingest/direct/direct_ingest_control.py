@@ -36,15 +36,15 @@ from recidiviz.common.ingest_metadata import SystemLevel
 from recidiviz.ingest.direct.controllers.direct_ingest_controller_factory import (
     DirectIngestControllerFactory,
 )
+from recidiviz.ingest.direct.direct_ingest_bucket_name_utils import (
+    get_region_code_from_direct_ingest_bucket,
+)
 from recidiviz.ingest.direct.direct_ingest_cloud_task_manager import (
     DirectIngestCloudTaskManager,
     DirectIngestCloudTaskManagerImpl,
 )
 from recidiviz.ingest.direct.gcs.direct_ingest_gcs_file_system import (
     DirectIngestGCSFileSystem,
-)
-from recidiviz.ingest.direct.gcs.directory_path_utils import (
-    gcsfs_direct_ingest_bucket_for_state,
 )
 from recidiviz.ingest.direct.raw_data.direct_ingest_raw_data_table_latest_view_updater import (
     DirectIngestRawDataTableLatestViewUpdater,
@@ -80,6 +80,11 @@ from recidiviz.utils import metadata, monitoring, regions
 from recidiviz.utils.auth.gae import requires_gae_auth
 from recidiviz.utils.monitoring import TagKey
 from recidiviz.utils.params import get_bool_param_value, get_str_param_value
+from recidiviz.utils.pubsub_helper import (
+    BUCKET_ID,
+    OBJECT_ID,
+    extract_pubsub_message_from_json,
+)
 from recidiviz.utils.regions import Region, get_supported_direct_ingest_region_codes
 
 m_sftp_attempts = measure.MeasureInt(
@@ -111,18 +116,27 @@ monitoring.register_views([sftp_attempts_view, sftp_errors_view])
 direct_ingest_control = Blueprint("direct_ingest_control", __name__)
 
 
-@direct_ingest_control.route("/normalize_raw_file_path")
+@direct_ingest_control.route("/normalize_raw_file_path", methods=["POST"])
 @requires_gae_auth
 def normalize_raw_file_path() -> Tuple[str, HTTPStatus]:
-    """Called from a Cloud Function when a new file is added to a bucket that is configured to rename files but not
-    ingest them. For example, a bucket that is being used for automatic data transfer testing.
+    """Called from a Cloud Storage Notification when a new file is added to a bucket that is
+    configured to rename files but not ingest them. For example, a bucket that is being used for
+    automatic data transfer testing.
     """
+    try:
+        message = extract_pubsub_message_from_json(request.get_json())
+    except Exception as e:
+        return str(e), HTTPStatus.BAD_REQUEST
+
+    if not message.attributes:
+        return "Invalid Pub/Sub message", HTTPStatus.BAD_REQUEST
+
+    attributes = message.attributes
+
     # The bucket name for the file to normalize
-    bucket = get_str_param_value("bucket", request.args)
+    bucket = attributes[BUCKET_ID]
     # The relative path to the file, not including the bucket name
-    relative_file_path = get_str_param_value(
-        "relative_file_path", request.args, preserve_case=True
-    )
+    relative_file_path = attributes[OBJECT_ID]
 
     if not bucket or not relative_file_path:
         return f"Bad parameters [{request.args}]", HTTPStatus.BAD_REQUEST
@@ -131,6 +145,7 @@ def normalize_raw_file_path() -> Tuple[str, HTTPStatus]:
         bucket_name=bucket, blob_name=relative_file_path
     )
 
+    logging.info("Handling file %s", path.abs_path())
     if not isinstance(path, GcsfsFilePath):
         raise ValueError(f"Incorrect type [{type(path)}] for path: {path.uri()}")
 
@@ -144,20 +159,39 @@ def normalize_raw_file_path() -> Tuple[str, HTTPStatus]:
     return "", HTTPStatus.OK
 
 
-@direct_ingest_control.route("/handle_direct_ingest_file")
+@direct_ingest_control.route("/handle_direct_ingest_file", methods=["POST"])
 @requires_gae_auth
 def handle_direct_ingest_file() -> Tuple[str, HTTPStatus]:
-    """Called from a Cloud Function when a new file is added to a direct ingest
+    """Called from a Cloud Storage Notification when a new file is added to a direct ingest
     bucket. Will trigger a job that deals with normalizing and splitting the
     file as is appropriate, then start the scheduler if allowed.
+
+    `start_ingest` can be set to `false` when a region has turned on nightly/weekly
+    automatic data transfer before we are ready to schedule and process ingest
+    jobs for that region (e.g. before ingest is "launched"). This will just
+    rename the incoming files to have a normalized path with a timestamp
+    so subsequent nightly uploads do not have naming conflicts.
     """
-    region_code = get_str_param_value("region", request.args)
+    try:
+        message = extract_pubsub_message_from_json(request.get_json())
+    except Exception as e:
+        return str(e), HTTPStatus.BAD_REQUEST
+
+    if not message.attributes:
+        return "Invalid Pub/Sub message", HTTPStatus.BAD_REQUEST
+
+    attributes = message.attributes
     # The bucket name for the file to ingest
-    bucket = get_str_param_value("bucket", request.args)
+    bucket = attributes[BUCKET_ID]
+    region_code = get_region_code_from_direct_ingest_bucket(bucket)
+    if not region_code:
+        response = f"Cannot parse region code from bucket {bucket}, returning."
+        logging.error(response)
+        return response, HTTPStatus.BAD_REQUEST
+
     # The relative path to the file, not including the bucket name
-    relative_file_path = get_str_param_value(
-        "relative_file_path", request.args, preserve_case=True
-    )
+    relative_file_path = attributes[OBJECT_ID]
+
     start_ingest = get_bool_param_value("start_ingest", request.args, default=False)
 
     if not region_code or not bucket or not relative_file_path or start_ingest is None:
@@ -166,16 +200,21 @@ def handle_direct_ingest_file() -> Tuple[str, HTTPStatus]:
         return response, HTTPStatus.BAD_REQUEST
 
     bucket_path = GcsfsBucketPath(bucket_name=bucket)
+    path = GcsfsPath.from_bucket_and_blob_name(
+        bucket_name=bucket, blob_name=relative_file_path
+    )
+    logging.info("Handling file %s", path.abs_path())
+
+    ingest_instance = DirectIngestInstanceFactory.for_ingest_bucket(bucket_path)
 
     with monitoring.push_region_tag(
         region_code,
-        ingest_instance=DirectIngestInstanceFactory.for_ingest_bucket(
-            bucket_path
-        ).value,
+        ingest_instance=ingest_instance.value,
     ):
         try:
             controller = DirectIngestControllerFactory.build(
-                ingest_bucket_path=bucket_path,
+                region_code=region_code,
+                ingest_instance=ingest_instance,
                 allow_unlaunched=True,
             )
         except DirectIngestError as e:
@@ -183,10 +222,6 @@ def handle_direct_ingest_file() -> Tuple[str, HTTPStatus]:
                 logging.error(str(e))
                 return str(e), HTTPStatus.BAD_REQUEST
             raise e
-
-        path = GcsfsPath.from_bucket_and_blob_name(
-            bucket_name=bucket, blob_name=relative_file_path
-        )
 
         if isinstance(path, GcsfsFilePath):
             controller.handle_file(path, start_ingest=start_ingest)
@@ -209,25 +244,29 @@ def handle_new_files() -> Tuple[str, HTTPStatus]:
     can_start_ingest = get_bool_param_value(
         "can_start_ingest", request.values, default=False
     )
-    bucket = get_str_param_value("bucket", request.values)
+    ingest_instance_str = get_str_param_value("ingest_instance", request.values)
     current_task_id = get_current_cloud_task_id()
 
-    if not region_code or can_start_ingest is None or not bucket:
+    if not region_code or can_start_ingest is None or not ingest_instance_str:
         response = f"Bad parameters [{request.values}]"
         logging.error(response)
         return response, HTTPStatus.BAD_REQUEST
 
-    bucket_path = GcsfsBucketPath(bucket_name=bucket)
+    try:
+        ingest_instance = DirectIngestInstance(ingest_instance_str.upper())
+    except ValueError:
+        response = f"Bad ingest instance value [{ingest_instance_str}]"
+        logging.error(response)
+        return response, HTTPStatus.BAD_REQUEST
 
     with monitoring.push_region_tag(
         region_code,
-        ingest_instance=DirectIngestInstanceFactory.for_ingest_bucket(
-            bucket_path
-        ).value,
+        ingest_instance=ingest_instance.value,
     ):
         try:
             controller = DirectIngestControllerFactory.build(
-                ingest_bucket_path=bucket_path,
+                region_code=region_code,
+                ingest_instance=ingest_instance,
                 allow_unlaunched=True,
             )
         except DirectIngestError as e:
@@ -268,13 +307,10 @@ def ensure_all_raw_file_paths_normalized() -> Tuple[str, HTTPStatus]:
         with monitoring.push_region_tag(
             region_code, ingest_instance=ingest_instance.value
         ):
-            ingest_bucket = gcsfs_direct_ingest_bucket_for_state(
-                region_code=region_code,
-                ingest_instance=ingest_instance,
-            )
             try:
                 controller = DirectIngestControllerFactory.build(
-                    ingest_bucket_path=ingest_bucket,
+                    region_code=region_code,
+                    ingest_instance=ingest_instance,
                     allow_unlaunched=True,
                 )
             except DirectIngestError as e:
@@ -286,7 +322,7 @@ def ensure_all_raw_file_paths_normalized() -> Tuple[str, HTTPStatus]:
             can_start_ingest = controller.region.is_ingest_launched_in_env()
             controller.cloud_task_manager.create_direct_ingest_handle_new_files_task(
                 controller.region,
-                ingest_bucket=controller.ingest_bucket_path,
+                ingest_instance=controller.ingest_instance,
                 can_start_ingest=can_start_ingest,
             )
     return "", HTTPStatus.OK
@@ -311,11 +347,12 @@ def raw_data_import() -> Tuple[str, HTTPStatus]:
 
     gcsfs_path = GcsfsFilePath.from_absolute_path(file_path)
 
+    ingest_instance = DirectIngestInstanceFactory.for_ingest_bucket(
+        gcsfs_path.bucket_path
+    )
     with monitoring.push_region_tag(
         region_code,
-        ingest_instance=DirectIngestInstanceFactory.for_ingest_bucket(
-            gcsfs_path.bucket_path
-        ).value,
+        ingest_instance=ingest_instance.value,
     ):
         json_data = request.get_data(as_text=True)
         data_import_args = _parse_cloud_task_args(json_data)
@@ -345,7 +382,8 @@ def raw_data_import() -> Tuple[str, HTTPStatus]:
         ):
             try:
                 controller = DirectIngestControllerFactory.build(
-                    ingest_bucket_path=data_import_args.raw_data_file_path.bucket_path,
+                    region_code=region_code,
+                    ingest_instance=ingest_instance,
                     allow_unlaunched=False,
                 )
             except DirectIngestError as e:
@@ -477,12 +515,9 @@ def materialize_ingest_view() -> Tuple[str, HTTPStatus]:
             {TagKey.INGEST_VIEW_MATERIALIZATION_TAG: args.task_id_tag()}
         ):
             try:
-                ingest_bucket = gcsfs_direct_ingest_bucket_for_state(
+                controller = DirectIngestControllerFactory.build(
                     region_code=region_code,
                     ingest_instance=ingest_instance,
-                )
-                controller = DirectIngestControllerFactory.build(
-                    ingest_bucket_path=ingest_bucket,
                     allow_unlaunched=False,
                 )
             except DirectIngestError as e:
@@ -558,12 +593,9 @@ def extract_and_merge() -> Tuple[str, HTTPStatus]:
 
         with monitoring.push_tags({TagKey.INGEST_TASK_TAG: ingest_args.task_id_tag()}):
             try:
-                ingest_bucket = gcsfs_direct_ingest_bucket_for_state(
+                controller = DirectIngestControllerFactory.build(
                     region_code=region_code,
                     ingest_instance=ingest_instance,
-                )
-                controller = DirectIngestControllerFactory.build(
-                    ingest_bucket_path=ingest_bucket,
                     allow_unlaunched=False,
                 )
             except DirectIngestError as e:
@@ -593,25 +625,29 @@ def scheduler() -> Tuple[str, HTTPStatus]:
     )
     current_task_id = get_current_cloud_task_id()
 
-    # The bucket name for ingest instance to schedule work out of
-    bucket = get_str_param_value("bucket", request.args)
+    ingest_instance_str = get_str_param_value("ingest_instance", request.args)
 
-    if not region_code or just_finished_job is None or not bucket:
+    if not region_code or just_finished_job is None or not ingest_instance_str:
         response = f"Bad parameters [{request.values}]"
         logging.error(response)
         return response, HTTPStatus.BAD_REQUEST
 
-    bucket_path = GcsfsBucketPath(bucket)
+    try:
+        ingest_instance = DirectIngestInstance(ingest_instance_str.upper())
+    except ValueError:
+        response = f"Bad ingest instance value [{ingest_instance_str}]"
+        logging.error(response)
+        return response, HTTPStatus.BAD_REQUEST
 
     with monitoring.push_region_tag(
         region_code,
-        ingest_instance=DirectIngestInstanceFactory.for_ingest_bucket(
-            bucket_path
-        ).value,
+        ingest_instance=ingest_instance.value,
     ):
         try:
             controller = DirectIngestControllerFactory.build(
-                ingest_bucket_path=bucket_path, allow_unlaunched=False
+                region_code=region_code,
+                ingest_instance=ingest_instance,
+                allow_unlaunched=False,
             )
         except DirectIngestError as e:
             if e.is_bad_request():
@@ -652,12 +688,9 @@ def kick_all_schedulers() -> None:
                     ingest_instance.check_is_valid_system_level(system_level)
                 except DirectIngestInstanceError:
                     continue
-                ingest_bucket = gcsfs_direct_ingest_bucket_for_state(
+                controller = DirectIngestControllerFactory.build(
                     region_code=region_code,
                     ingest_instance=ingest_instance,
-                )
-                controller = DirectIngestControllerFactory.build(
-                    ingest_bucket_path=ingest_bucket,
                     allow_unlaunched=False,
                 )
 
@@ -685,7 +718,9 @@ def upload_from_sftp() -> Tuple[str, HTTPStatus]:
     region_code = get_str_param_value("region", request.values)
     date_str = get_str_param_value("date", request.values)
     bucket_str = get_str_param_value("bucket", request.values)
-    gcs_destination_path = GcsfsBucketPath(bucket_str) if bucket_str else None
+    gcs_destination_bucket_override = (
+        GcsfsBucketPath(bucket_str) if bucket_str else None
+    )
 
     if not region_code:
         response = f"Bad parameters [{request.values}]"
@@ -702,7 +737,7 @@ def upload_from_sftp() -> Tuple[str, HTTPStatus]:
             project_id=metadata.project_id(),
             region_code=region_code,
             lower_bound_update_datetime=lower_bound_update_datetime,
-            gcs_destination_path=gcs_destination_path,
+            gcs_destination_path=gcs_destination_bucket_override,
         )
         download_result = sftp_controller.do_fetch()
 
@@ -747,7 +782,7 @@ def upload_from_sftp() -> Tuple[str, HTTPStatus]:
             paths_with_timestamps=download_result.successes,
             project_id=metadata.project_id(),
             region_code=region_code,
-            gcs_destination_path=gcs_destination_path,
+            gcs_destination_path=gcs_destination_bucket_override,
         )
         upload_result = upload_controller.do_upload()
 
@@ -802,11 +837,23 @@ def upload_from_sftp() -> Tuple[str, HTTPStatus]:
         # Trigger ingest to handle copied files (in case queue has emptied already while
         # ingest was paused).
         direct_ingest_cloud_task_manager = DirectIngestCloudTaskManagerImpl()
-        direct_ingest_cloud_task_manager.create_direct_ingest_handle_new_files_task(
-            region=_region_for_region_code(region_code),
-            ingest_bucket=upload_controller.destination_ingest_bucket,
-            can_start_ingest=True,
-        )
+
+        if not gcs_destination_bucket_override:
+            try:
+                ingest_instance = DirectIngestInstanceFactory.for_ingest_bucket(
+                    upload_controller.destination_ingest_bucket
+                )
+            except ValueError:
+                # If the destination path is not a real ingest bucket, do not
+                # trigger the scheduler.
+                ingest_instance = None
+
+            if ingest_instance:
+                direct_ingest_cloud_task_manager.create_direct_ingest_handle_new_files_task(
+                    region=_region_for_region_code(region_code),
+                    ingest_instance=ingest_instance,
+                    can_start_ingest=True,
+                )
 
         return "", HTTPStatus.OK
 

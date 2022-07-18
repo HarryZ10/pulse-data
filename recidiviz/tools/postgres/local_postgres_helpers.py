@@ -22,7 +22,7 @@ import shutil
 import tempfile
 from typing import Dict, Optional
 
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.orm.session import close_all_sessions
 
 from conftest import get_pytest_worker_id
@@ -47,8 +47,8 @@ from recidiviz.persistence.database.sqlalchemy_database_key import SQLAlchemyDat
 from recidiviz.persistence.database.sqlalchemy_engine_manager import (
     SQLAlchemyEngineManager,
 )
-from recidiviz.tests.persistence.database.schema_entity_converter.test_base_schema import (
-    TestBase,
+from recidiviz.tests.persistence.database.schema_entity_converter.fake_base_schema import (
+    FakeBase,
 )
 from recidiviz.tools.utils.script_helpers import run_command
 from recidiviz.utils import environment
@@ -59,7 +59,7 @@ DECLARATIVE_BASES = [
     StateBase,
     JailsBase,
     JusticeCountsBase,
-    TestBase,
+    FakeBase,
     CaseTriageBase,
     PathwaysBase,
 ]
@@ -251,7 +251,7 @@ def _stop_on_disk_postgresql_database(
 
 
 @environment.local_only
-def use_on_disk_postgresql_database(database_key: SQLAlchemyDatabaseKey) -> None:
+def use_on_disk_postgresql_database(database_key: SQLAlchemyDatabaseKey) -> Engine:
     """Connects SQLAlchemy to a local test postgres server. Should be called after the test database and user have
     already been initialized.
 
@@ -268,6 +268,8 @@ def use_on_disk_postgresql_database(database_key: SQLAlchemyDatabaseKey) -> None
     )
     # Auto-generate all tables that exist in our schema in this database
     database_key.declarative_meta.metadata.create_all(engine)
+
+    return engine
 
 
 def get_on_disk_postgres_port() -> int:

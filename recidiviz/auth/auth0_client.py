@@ -16,9 +16,13 @@
 # =============================================================================
 """Wrapper around the Auth0 Client
 """
-from typing import Dict, List, Optional, TypedDict
+import logging
+from functools import wraps
+from http import HTTPStatus
+from typing import Any, Callable, Dict, List, Optional, TypedDict, Union
 
 from auth0.v3.authentication import GetToken
+from auth0.v3.exceptions import Auth0Error
 from auth0.v3.management import Auth0
 from auth0.v3.rest import RestClientOptions
 from ratelimit import limits, sleep_and_retry
@@ -27,27 +31,63 @@ from recidiviz.utils import secrets
 
 AUTH0_QPS_LIMIT = 2
 
-Auth0AppMetadata = TypedDict(
-    "Auth0AppMetadata",
+
+class CaseTriageAuth0AppMetadata(TypedDict):
+    allowed_supervision_location_ids: List[str]
+    allowed_supervision_location_level: Optional[str]
+    can_access_leadership_dashboard: bool
+    can_access_case_triage: bool
+    should_see_beta_charts: bool
+    routes: Optional[dict]
+    user_hash: str
+
+
+class JusticeCountsAuth0AppMetadata(TypedDict, total=False):
+    has_seen_onboarding: Optional[Dict[str, bool]]
+    agency_ids: List[int]
+
+
+Auth0User = TypedDict(
+    "Auth0User",
     {
-        "allowed_supervision_location_ids": List[str],
-        "allowed_supervision_location_level": Optional[str],
-        "can_access_leadership_dashboard": bool,
-        "can_access_case_triage": bool,
-        "should_see_beta_charts": bool,
-        "routes": Optional[dict],
-        "user_hash": str,
+        "email": str,
+        "user_id": str,
+        "name": str,
+        "app_metadata": Union[
+            JusticeCountsAuth0AppMetadata, CaseTriageAuth0AppMetadata
+        ],
     },
 )
 
-Auth0User = TypedDict(
-    "Auth0User", {"email": str, "user_id": str, "app_metadata": Auth0AppMetadata}
-)
 
 # The max results the API allows per page is 50, but the lucene query can become too long, so we limit it by 25.
 MAX_RESULTS_PER_PAGE = 25
 MAX_RATE_LIMIT_RETRIES = 10
 REST_REQUEST_TIMEOUT = 15.0
+
+
+def _refresh_token_if_needed(fn: Callable) -> Callable:
+    @wraps(fn)
+    def decorated(
+        self: "Auth0Client", *args: List[Any], **kwargs: Dict[str, Any]
+    ) -> Callable:
+
+        try:
+            return fn(self, *args, **kwargs)
+        except Auth0Error as e:
+            if (
+                e.status_code == HTTPStatus.UNAUTHORIZED
+                and "Expired token" in e.message
+            ):
+                logging.info(
+                    "Auth0 Management API token expired; "
+                    "fetching new one and re-initializing the client."
+                )
+                self.refresh_client_with_new_token()
+                return fn(self, *args, **kwargs)
+            raise e
+
+    return decorated
 
 
 class Auth0Client:
@@ -80,28 +120,29 @@ class Auth0Client:
         )
 
         self.audience = f"https://{self._domain}/api/v2/"
-        self.client = Auth0(
-            self._domain, self.access_token, rest_options=self._rest_options
-        )
+        self.refresh_client_with_new_token()
 
-    def get_token(self) -> Dict[str, str]:
+    def fetch_new_access_token(self) -> str:
         """Makes a request to the Auth0 Management API for an access token using the client credentials
         authorization flow."""
-        return GetToken(self._domain).client_credentials(
+        token = GetToken(self._domain).client_credentials(
             client_id=self._client_id,
             client_secret=self._client_secret,
             audience=self.audience,
         )
-
-    @property
-    def access_token(self) -> str:
-        token = self.get_token()
         return token["access_token"]
 
+    def refresh_client_with_new_token(self) -> None:
+        self.client = Auth0(
+            self._domain, self.fetch_new_access_token(), rest_options=self._rest_options
+        )
+
+    @_refresh_token_if_needed
     def get_user_by_id(self, user_id: str) -> Auth0User:
         """Given an Auth0 user id, return the corresponding user."""
         return self.client.users.get(id=user_id)
 
+    @_refresh_token_if_needed
     def get_all_users(self) -> List[Auth0User]:
         """Return a list of all Auth0 users associated with this tenant."""
         all_users = []
@@ -116,6 +157,7 @@ class Auth0Client:
             continue_fetching = len(users) == MAX_RESULTS_PER_PAGE
         return all_users
 
+    @_refresh_token_if_needed
     def get_all_users_by_email_addresses(
         self, email_addresses: List[str]
     ) -> List[Auth0User]:
@@ -137,9 +179,46 @@ class Auth0Client:
 
     @sleep_and_retry
     @limits(calls=AUTH0_QPS_LIMIT, period=1)
-    def update_user_app_metadata(
-        self, user_id: str, app_metadata: Auth0AppMetadata
+    @_refresh_token_if_needed
+    def update_user_name_and_email(
+        self,
+        user_id: str,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+        email_verified: Optional[bool] = False,
+    ) -> Auth0User:
+        """Updates a single Auth0 user's name and email fields.
+        This function is limited to two calls per second. Any calls beyond that will cause the function to sleep until
+        it is safe to call again."""
+
+        body: Dict[str, Any] = {}
+        if email:
+            body["email"] = email
+            body["email_verified"] = email_verified
+
+        if name:
+            body["name"] = name
+        return self.client.users.update(id=user_id, body=body)
+
+    @sleep_and_retry
+    @limits(calls=AUTH0_QPS_LIMIT, period=1)
+    @_refresh_token_if_needed
+    def send_verification_email(
+        self,
+        user_id: str,
     ) -> None:
+        """Sends verification email to user."""
+
+        return self.client.jobs.send_verification_email(body={"user_id": user_id})
+
+    @sleep_and_retry
+    @_refresh_token_if_needed
+    @limits(calls=AUTH0_QPS_LIMIT, period=1)
+    def update_user_app_metadata(
+        self,
+        user_id: str,
+        app_metadata: Union[JusticeCountsAuth0AppMetadata, CaseTriageAuth0AppMetadata],
+    ) -> Auth0User:
         """Updates a single Auth0 user's app_metadata field. Root-level properties are merged, and any nested properties
         are replaced. To delete an app_metadata property, send None as the value. To delete the app_metadata entirely,
         send an empty dictionary.

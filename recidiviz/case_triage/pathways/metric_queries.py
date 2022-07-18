@@ -20,14 +20,17 @@ import enum
 from typing import Dict, Generic, List, Optional, TypeVar, Union
 
 import attr
-from sqlalchemy import Column, func
-from sqlalchemy.orm import Query, class_mapper
+from sqlalchemy import Column, String, cast, func, literal_column
+from sqlalchemy.dialects.postgresql import aggregate_order_by
+from sqlalchemy.orm import Query
 
 from recidiviz.case_triage.pathways.dimension import Dimension
 from recidiviz.persistence.database.schema.pathways.schema import (
     LibertyToPrisonTransitions,
     PathwaysBase,
     PrisonToSupervisionTransitions,
+    SupervisionToLibertyTransitions,
+    SupervisionToPrisonTransitions,
 )
 
 
@@ -164,7 +167,8 @@ class CountByDimensionMetricQueryBuilder(
 class PersonLevelMetricQueryBuilder(MetricQueryBuilder[FetchMetricParams]):
     """Builder for Pathways postgres queries that return individual rows, potentially filtered by a condition."""
 
-    exclude_columns: List[Column]
+    non_aggregate_columns: List[Column]
+    aggregate_columns: List[Column]
 
     def build_query(self, params: FetchMetricParams) -> Query:
         conditions = [
@@ -177,12 +181,29 @@ class PersonLevelMetricQueryBuilder(MetricQueryBuilder[FetchMetricParams]):
                 raise MetricQueryError(f"Querying 'since' is not allowed for {self}")
             conditions.append(self.timestamp_column >= params.since)
 
-        columns = [
+        grouped_columns = [
             column
-            for column in class_mapper(self.model).columns
-            if column not in self.exclude_columns
+            for mapping in self.dimension_mappings
+            for column in mapping.columns
+            if column not in self.aggregate_columns
+        ] + self.non_aggregate_columns
+
+        # The frontend displays a single row per person, with multiple ages/facilities separated
+        # by ", ". Do that logic here to open the possibility of paginating later.
+        aggregate_columns = [
+            func.string_agg(
+                cast(column, String),
+                # Sort the results alphabetically, which is likely to end up being the way they're
+                # ordered in the old backend since we have ORDER BY in our views.
+                aggregate_order_by(literal_column("', '"), column),
+            ).label(column.name)
+            for column in self.aggregate_columns
         ]
-        return Query(columns).filter(*conditions)
+        return (
+            Query([*grouped_columns, *aggregate_columns])
+            .filter(*conditions)
+            .group_by(*grouped_columns)
+        )
 
     def build_params(self, schema: Dict) -> FetchMetricParams:
         return FetchMetricParams(**schema)
@@ -293,8 +314,135 @@ PrisonToSupervisionTransitionsPersonLevel = PersonLevelMetricQueryBuilder(
             columns=[PrisonToSupervisionTransitions.time_period],
         ),
     ],
-    exclude_columns=[
-        PrisonToSupervisionTransitions.state_code,
-        PrisonToSupervisionTransitions.transition_date,
+    non_aggregate_columns=[
+        PrisonToSupervisionTransitions.full_name,
+        PrisonToSupervisionTransitions.state_id,
+    ],
+    aggregate_columns=[
+        PrisonToSupervisionTransitions.age,
+        PrisonToSupervisionTransitions.facility,
+    ],
+)
+
+SupervisionToLibertyTransitionsCount = CountByDimensionMetricQueryBuilder(
+    name="SupervisionToLibertyTransitionsCount",
+    model=SupervisionToLibertyTransitions,
+    timestamp_column=SupervisionToLibertyTransitions.transition_date,
+    dimension_mappings=[
+        DimensionMapping(
+            dimension=Dimension.YEAR_MONTH,
+            operations=DimensionOperation.GROUP,
+            columns=[
+                SupervisionToLibertyTransitions.year,
+                SupervisionToLibertyTransitions.month,
+            ],
+        ),
+        DimensionMapping(
+            dimension=Dimension.AGE_GROUP,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.age_group],
+        ),
+        DimensionMapping(
+            dimension=Dimension.GENDER,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.gender],
+        ),
+        DimensionMapping(
+            dimension=Dimension.RACE,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.race],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_TYPE,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.supervision_type],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_LEVEL,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.supervision_level],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_DISTRICT,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.supervision_district],
+        ),
+        # TODO(#13552): Remove this once FE uses supervision_district
+        DimensionMapping(
+            dimension=Dimension.DISTRICT,
+            operations=DimensionOperation.ALL,
+            columns=[
+                SupervisionToLibertyTransitions.supervision_district.label("district")
+            ],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISING_OFFICER,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToLibertyTransitions.supervising_officer],
+        ),
+    ],
+)
+
+SupervisionToPrisonTransitionsCount = CountByDimensionMetricQueryBuilder(
+    name="SupervisionToPrisonTransitionsCount",
+    model=SupervisionToPrisonTransitions,
+    timestamp_column=SupervisionToPrisonTransitions.transition_date,
+    dimension_mappings=[
+        DimensionMapping(
+            dimension=Dimension.YEAR_MONTH,
+            operations=DimensionOperation.GROUP,
+            columns=[
+                SupervisionToPrisonTransitions.year,
+                SupervisionToPrisonTransitions.month,
+            ],
+        ),
+        DimensionMapping(
+            dimension=Dimension.AGE_GROUP,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.age_group],
+        ),
+        DimensionMapping(
+            dimension=Dimension.GENDER,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.gender],
+        ),
+        DimensionMapping(
+            dimension=Dimension.RACE,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.race],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_TYPE,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.supervision_type],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_LEVEL,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.supervision_level],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISION_DISTRICT,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.supervision_district],
+        ),
+        # TODO(#13552): Remove this once FE uses supervision_district
+        DimensionMapping(
+            dimension=Dimension.DISTRICT,
+            operations=DimensionOperation.ALL,
+            columns=[
+                SupervisionToPrisonTransitions.supervision_district.label("district")
+            ],
+        ),
+        DimensionMapping(
+            dimension=Dimension.SUPERVISING_OFFICER,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.supervising_officer],
+        ),
+        DimensionMapping(
+            dimension=Dimension.LENGTH_OF_STAY,
+            operations=DimensionOperation.ALL,
+            columns=[SupervisionToPrisonTransitions.length_of_stay],
+        ),
     ],
 )

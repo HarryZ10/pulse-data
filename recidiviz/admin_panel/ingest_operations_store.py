@@ -25,6 +25,9 @@ from recidiviz.admin_panel.admin_panel_store import AdminPanelStore
 from recidiviz.big_query.big_query_client import BigQueryClientImpl
 from recidiviz.cloud_storage.gcsfs_factory import GcsfsFactory
 from recidiviz.cloud_storage.gcsfs_path import GcsfsFilePath
+from recidiviz.common.constants.operations.direct_ingest_instance_status import (
+    DirectIngestStatus,
+)
 from recidiviz.common.constants.states import StateCode
 from recidiviz.ingest.direct.direct_ingest_cloud_task_manager import (
     DirectIngestCloudTaskManagerImpl,
@@ -38,15 +41,16 @@ from recidiviz.ingest.direct.gcs.directory_path_utils import (
     gcsfs_direct_ingest_storage_directory_path_for_state,
 )
 from recidiviz.ingest.direct.ingest_view_materialization.instance_ingest_view_contents import (
-    IngestViewContentsSummary,
     InstanceIngestViewContentsImpl,
 )
 from recidiviz.ingest.direct.metadata.direct_ingest_instance_pause_status_manager import (
     DirectIngestInstancePauseStatusManager,
 )
+from recidiviz.ingest.direct.metadata.direct_ingest_instance_status_manager import (
+    DirectIngestInstanceStatusManager,
+)
 from recidiviz.ingest.direct.metadata.direct_ingest_view_materialization_metadata_manager import (
     DirectIngestViewMaterializationMetadataManager,
-    IngestViewMaterializationSummary,
 )
 from recidiviz.ingest.direct.metadata.postgres_direct_ingest_file_metadata_manager import (
     PostgresDirectIngestRawFileMetadataManager,
@@ -56,7 +60,6 @@ from recidiviz.ingest.direct.regions.direct_ingest_region_utils import (
 )
 from recidiviz.ingest.direct.types.direct_ingest_instance import DirectIngestInstance
 from recidiviz.utils import metadata
-from recidiviz.utils.environment import in_development
 from recidiviz.utils.regions import get_region
 
 _TASK_LOCATION = "us-east1"
@@ -109,13 +112,6 @@ class IngestOperationsStore(AdminPanelStore):
         formatted_state_code = state_code.value.lower()
         region = get_region(formatted_state_code, is_direct_ingest=True)
 
-        # Get the ingest bucket for this region and instance
-        ingest_bucket_path = gcsfs_direct_ingest_bucket_for_state(
-            region_code=formatted_state_code,
-            ingest_instance=instance,
-            project_id=metadata.project_id(),
-        )
-
         logging.info(
             "Creating cloud task to schedule next job and kick ingest for %s instance in %s.",
             instance,
@@ -123,7 +119,7 @@ class IngestOperationsStore(AdminPanelStore):
         )
         self.cloud_task_manager.create_direct_ingest_handle_new_files_task(
             region=region,
-            ingest_bucket=ingest_bucket_path,
+            ingest_instance=instance,
             can_start_ingest=can_start_ingest,
         )
 
@@ -259,7 +255,8 @@ class IngestOperationsStore(AdminPanelStore):
             List[Dict[str, Union[Optional[str], int]]],
         ],
     ]:
-        """Returns the following dictionary with information about the operations database for the state:
+        """Returns the following dictionary with information about the operations
+        database for the state:
         {
             isPaused: <bool>
             unprocessedFilesRaw: <int>
@@ -275,35 +272,7 @@ class IngestOperationsStore(AdminPanelStore):
                 }
             ]
         }
-
-        If running locally, this does not hit the live DB instance and only returns fake
-        data.
         """
-        if in_development():
-            return {
-                "isPaused": ingest_instance == DirectIngestInstance.SECONDARY,
-                "unprocessedFilesRaw": -1,
-                "processedFilesRaw": -2,
-                "ingestViewMaterializationSummaries": [
-                    IngestViewMaterializationSummary(
-                        ingest_view_name="some_view",
-                        num_pending_jobs=-5,
-                        num_completed_jobs=-6,
-                        completed_jobs_max_datetime=datetime(2000, 1, 1, 1, 1, 1, 1),
-                        pending_jobs_min_datetime=datetime(2000, 2, 2, 2, 2, 2, 2),
-                    ).as_api_dict()
-                ],
-                "ingestViewContentsSummaries": [
-                    IngestViewContentsSummary(
-                        ingest_view_name="some_view",
-                        num_processed_rows=0,
-                        processed_rows_max_datetime=None,
-                        unprocessed_rows_min_datetime=datetime(2000, 3, 3, 3, 3, 3, 3),
-                        num_unprocessed_rows=10,
-                    ).as_api_dict()
-                ],
-            }
-
         logging.info(
             "Getting operations DB metadata for instance [%s]", ingest_instance.value
         )
@@ -383,3 +352,23 @@ class IngestOperationsStore(AdminPanelStore):
                 if summary is not None
             ],
         }
+
+    def get_all_current_ingest_instance_statuses(
+        self,
+    ) -> Dict[StateCode, Dict[DirectIngestInstance, Optional[DirectIngestStatus]]]:
+        """Returns the current status of each ingest instance for states in the given project."""
+
+        ingest_statuses = {}
+        for state_code in get_direct_ingest_states_launched_in_env():
+            instance_to_status_dict = {}
+            for i_instance in DirectIngestInstance:  # new direct ingest instance
+                status_manager = DirectIngestInstanceStatusManager(
+                    region_code=state_code.value, ingest_instance=i_instance
+                )
+                curr_status = status_manager.get_current_status()
+
+                instance_to_status_dict[i_instance] = curr_status
+
+            ingest_statuses[state_code] = instance_to_status_dict
+
+        return ingest_statuses

@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // =============================================================================
 
-import React, { InputHTMLAttributes } from "react";
+import React, { InputHTMLAttributes, useState } from "react";
 import styled from "styled-components/macro";
 
 import { rem } from "../../utils";
@@ -43,7 +43,7 @@ export const Input = styled.input<InputProps>`
   resize: none;
   height: ${({ multiline }) => (multiline ? "200px;" : "71px;")};
   padding: ${({ persistLabel }) =>
-    persistLabel ? "42px 90px 16px 16px" : "16px 55px 10px 16px"}};
+    persistLabel ? "42px 16px 16px 16px" : "16px 55px 10px 16px"}};
   background: ${({ value, error }) => {
     if (error) {
       return palette.highlight.red;
@@ -175,12 +175,22 @@ export const RequiredChip = styled.span`
   }
 `;
 
+export const InputTooltip = styled.div`
+  position: absolute;
+  top: 72px;
+  border-radius: 4px;
+  padding: 16px;
+  background-color: ${palette.solid.darkgrey};
+  color: ${palette.solid.white};
+`;
+
 interface TextInputProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
   error?: string;
   valueLabel?: string;
   multiline?: boolean;
   persistLabel?: boolean;
+  metricKey?: string;
 }
 
 export const TextInput: React.FC<TextInputProps> = ({
@@ -190,15 +200,32 @@ export const TextInput: React.FC<TextInputProps> = ({
   multiline,
   placeholder,
   persistLabel,
+  metricKey,
   ...props
 }): JSX.Element => {
+  const [showTooltip, setShowTooltip] = useState<boolean>();
   const { name, required, value, disabled } = props;
 
+  const showTooltipIfTruncated = (
+    e: React.MouseEvent<HTMLInputElement, MouseEvent>
+  ) => {
+    const labelElement = e.currentTarget.lastElementChild as HTMLElement;
+    if (labelElement.offsetWidth < labelElement.scrollWidth) {
+      setShowTooltip(true);
+    }
+  };
+  const clearTooltip = () => setShowTooltip(false);
+
   return (
-    <InputWrapper>
+    <InputWrapper
+      onMouseEnter={showTooltipIfTruncated}
+      onMouseLeave={clearTooltip}
+      onFocus={clearTooltip}
+    >
       {/* Text Input */}
       <Input
         {...props}
+        data-metric-key={metricKey}
         disabled={disabled}
         as={multiline ? "textarea" : "input"}
         multiline={multiline}
@@ -218,6 +245,8 @@ export const TextInput: React.FC<TextInputProps> = ({
       >
         {label}
       </InputLabel>
+
+      {showTooltip && <InputTooltip>{name}</InputTooltip>}
 
       {/* Error Description (appears below text input) */}
       {error && (

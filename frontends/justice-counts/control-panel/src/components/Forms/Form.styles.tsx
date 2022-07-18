@@ -184,10 +184,9 @@ export const TabDisplay = styled.div`
 `;
 
 export const DisaggregationInputWrapper = styled.div`
-  width: 315px;
-
   label {
-    width: 200px;
+    width: 100%;
+    padding-right: 26px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -195,6 +194,10 @@ export const DisaggregationInputWrapper = styled.div`
 
   @media only screen and (max-width: ${SINGLE_COLUMN_MAX_WIDTH}px) {
     width: 100%;
+
+    label {
+      width: 100%;
+    }
   }
 `;
 
@@ -215,7 +218,7 @@ export const Button = styled.button`
   }
 `;
 
-export const GoBackToReportsOverviewLink = styled.a`
+export const GoBack = styled.a`
   color: ${palette.solid.blue};
   transition: 0.2s ease;
 
@@ -224,6 +227,12 @@ export const GoBackToReportsOverviewLink = styled.a`
     opacity: 0.85;
   }
 
+  &::after {
+    content: "← Back";
+  }
+`;
+
+export const GoBackToReportsOverviewLink = styled(GoBack)`
   &::after {
     content: "← Back to Reports Overview";
   }

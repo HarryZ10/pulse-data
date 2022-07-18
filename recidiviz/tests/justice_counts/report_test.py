@@ -83,6 +83,50 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
             )
             self.assertEqual(reports_agency_B[0].source_id, agency_B.id)
 
+    def test_delete_reports(self) -> None:
+        with SessionFactory.using_database(self.database_key) as session:
+            monthly_report = self.test_schema_objects.test_report_monthly
+            annual_report = self.test_schema_objects.test_report_annual
+            session.add_all(
+                [
+                    monthly_report,
+                    annual_report,
+                ]
+            )
+
+            session.flush()
+            session.refresh(monthly_report)
+            session.refresh(annual_report)
+            monthly_report_id = monthly_report.id
+            annual_report_id = annual_report.id
+
+        with SessionFactory.using_database(self.database_key) as session:
+            monthly_report = ReportInterface.get_report_by_id(
+                session, report_id=monthly_report_id
+            )
+            ReportInterface.add_or_update_metric(
+                session=session,
+                report=monthly_report,
+                report_metric=self.test_schema_objects.reported_budget_metric,
+                user_account=self.test_schema_objects.test_user_A,
+            )
+
+            datapoints = session.query(schema.Datapoint).all()
+            self.assertEqual(len(datapoints), 5)
+
+        with SessionFactory.using_database(self.database_key) as session:
+            ReportInterface.delete_reports_by_id(
+                session, report_ids=[monthly_report_id, annual_report_id]
+            )
+
+            reports = session.query(schema.Report).all()
+            self.assertEqual(len(reports), 0)
+
+            # Datapoints on the report should be automatically deleted
+            # via `cascade`
+            datapoints = session.query(schema.Datapoint).all()
+            self.assertEqual(len(datapoints), 0)
+
     def test_create_report(self) -> None:
         with SessionFactory.using_database(self.database_key) as session:
             session.add_all(
@@ -284,7 +328,7 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 self.assertEqual(report.status, schema.ReportStatus.NOT_STARTED)
                 updated_report = ReportInterface.update_report_metadata(
                     session=session,
-                    report_id=report.id,
+                    report=report,
                     editor_id=user_a_id,
                     status=schema.ReportStatus.DRAFT.value,
                 )
@@ -297,7 +341,7 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 ).id
                 updated_report = ReportInterface.update_report_metadata(
                     session=session,
-                    report_id=report.id,
+                    report=updated_report,
                     editor_id=user_c_id,
                     status=schema.ReportStatus.DRAFT.value,
                 )
@@ -305,7 +349,7 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 self.assertEqual(updated_report.modified_by, [user_a_id, user_c_id])
                 updated_report = ReportInterface.update_report_metadata(
                     session=session,
-                    report_id=report.id,
+                    report=updated_report,
                     status=schema.ReportStatus.PUBLISHED.value,
                     editor_id=user_a_id,
                 )
@@ -319,7 +363,7 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
             with freeze_time(update_datetime):
                 updated_report = ReportInterface.update_report_metadata(
                     session=session,
-                    report_id=report.id,
+                    report=updated_report,
                     status=schema.ReportStatus.PUBLISHED.value,
                     editor_id=user_a_id,
                 )
@@ -734,8 +778,9 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
             )
             contexts = [d for d in queried_datapoints if d.context_key is not None]
             self.assertEqual(len(contexts), 2)
-            self.assertEqual(contexts[0].get_value(), "All calls")
-            self.assertEqual(contexts[1].get_value(), "agency0, agency1")
+            self.assertEqual(
+                {c.get_value() for c in contexts}, {"All calls", "agency0, agency1"}
+            )
 
     def test_get_metrics_for_empty_report(self) -> None:
         with SessionFactory.using_database(self.database_key) as session:
@@ -746,11 +791,9 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 ]
             )
             session.flush()
-            report_id = self.test_schema_objects.test_report_monthly.id
             metrics = sorted(
-                ReportInterface.get_metrics_by_report_id(
-                    session=session,
-                    report_id=report_id,
+                ReportInterface.get_metrics_by_report(
+                    report=self.test_schema_objects.test_report_monthly,
                 ),
                 key=lambda x: x.key,
             )
@@ -792,9 +835,7 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 report_metric=self.test_schema_objects.reported_calls_for_service_metric,
                 user_account=self.test_schema_objects.test_user_A,
             )
-            metrics = ReportInterface.get_metrics_by_report_id(
-                session=session, report_id=report_id
-            )
+            metrics = ReportInterface.get_metrics_by_report(report=report)
             self.assertEqual(len(metrics), 3)
             calls_for_service = [
                 metric
@@ -991,20 +1032,16 @@ class TestReportInterface(JusticeCountsDatabaseTestCase):
                 ]
             )
             session.flush()
-            supervision_report_id = self.test_schema_objects.test_report_supervision.id
-            parole_report_id = self.test_schema_objects.test_report_parole.id
 
             supervision_metrics = sorted(
-                ReportInterface.get_metrics_by_report_id(
-                    session=session,
-                    report_id=supervision_report_id,
+                ReportInterface.get_metrics_by_report(
+                    report=self.test_schema_objects.test_report_supervision,
                 ),
                 key=lambda x: x.key,
             )
             parole_metrics = sorted(
-                ReportInterface.get_metrics_by_report_id(
-                    session=session,
-                    report_id=parole_report_id,
+                ReportInterface.get_metrics_by_report(
+                    report=self.test_schema_objects.test_report_parole,
                 ),
                 key=lambda x: x.key,
             )

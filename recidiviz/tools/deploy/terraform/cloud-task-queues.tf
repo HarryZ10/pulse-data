@@ -76,12 +76,16 @@ module "bq-view-update-queue" {
 }
 
 # Queue used to process tasks that export the results of metric view queries to GCS.
+# TODO(#4593): We might be able to get rid of this queue entirely once we run the metric
+#  export endpoints directly in Airflow, rather than just triggering the tasks with
+#  Pub/Sub topics.
 module "metric-view-export-queue" {
   source = "./modules/base-task-queue"
 
   queue_name         = "metric-view-export"
   region             = var.app_engine_region
   max_retry_attempts = 1
+  max_concurrent_dispatches = 50
 }
 
 # Queue used for tasks to update raw data `*_latest` views for all states.
@@ -99,48 +103,4 @@ module "case-triage-db-operations-queue" {
   queue_name                = "case-triage-db-operations-queue"
   region                    = var.app_engine_region
   max_dispatches_per_second = 100
-}
-
-locals {
-  # Region Queues
-  ingest_scrape_manifest = fileset("${local.recidiviz_root}/ingest/scrape/regions", "*/manifest.yaml")
-  region_manifests = merge(
-    # Seeing "too many open files" errors? Try running `ulimit -n 1024`
-    { for f in local.ingest_scrape_manifest : dirname(f) => yamldecode(file("${local.recidiviz_root}/ingest/scrape/regions/${f}")) },
-    { for region_code_upper, manifest in local.direct_ingest_region_manifests : lower(region_code_upper) => manifest }
-  )
-  region_queues = { for region, m in local.region_manifests : region => {
-    # The below should be able to be try(m.queue.rate_limits.max_dispatches_per_second, null),
-    # but that doesn't work: https://github.com/hashicorp/terraform/issues/24142
-    max_dispatches_per_second = try(m.queue.rate_limits.max_dispatches_per_second, 0.083333333)
-  } if try(m.shared_queue, null) == null && (!local.is_production || try(m.environment, null) == "production") }
-
-  # Vendor Queues
-  vendor_queue_files = fileset("${local.recidiviz_root}/ingest/scrape/vendors", "*/queue.yaml")
-  vendor_manifests   = { for f in local.vendor_queue_files : dirname(f) => yamldecode(file("${local.recidiviz_root}/ingest/scrape/vendors/${f}")) }
-  vendor_queues = { for vendor, m in local.vendor_manifests : vendor => {
-    max_dispatches_per_second = try(m.rate_limits.max_dispatches_per_second, 0.083333333)
-    max_concurrent_dispatches = try(m.rate_limits.max_concurrent_dispatches, 3)
-  } }
-}
-
-module "scraper-region-queues" {
-  for_each = local.region_queues
-
-  source = "./modules/base-scraper-task-queue"
-
-  queue_name                = "${replace(each.key, "_", "-")}-scraper-v2"
-  region                    = var.app_engine_region
-  max_dispatches_per_second = each.value.max_dispatches_per_second
-}
-
-module "scraper-vendor-queues" {
-  for_each = local.vendor_queues
-
-  source = "./modules/base-scraper-task-queue"
-
-  queue_name                = "vendor-${replace(each.key, "_", "-")}-scraper-v2"
-  region                    = var.app_engine_region
-  max_dispatches_per_second = each.value.max_dispatches_per_second
-  max_concurrent_dispatches = each.value.max_concurrent_dispatches
 }

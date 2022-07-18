@@ -14,28 +14,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // =============================================================================
-import { User } from "@auth0/auth0-spa-js";
 import { makeAutoObservable, runInAction, when } from "mobx";
 
 import { AuthStore } from "../components/Auth";
+import { showToast } from "../components/Toast";
 import API from "./API";
 
 type UserAgency = {
   name: string;
   id: number;
 };
+
+type UserSettingsRequestBody = {
+  name: string | null;
+  email: string | null;
+};
 class UserStore {
   authStore: AuthStore;
 
   api: API;
-
-  name: string | undefined;
-
-  email: string | undefined;
-
-  nameOrEmail: string | undefined;
-
-  userID: string | undefined;
 
   auth0UserID: string | undefined;
 
@@ -51,13 +48,9 @@ class UserStore {
 
   constructor(authStore: AuthStore, api: API) {
     makeAutoObservable(this);
-
     this.authStore = authStore;
     this.api = api;
-    this.name = undefined;
-    this.email = undefined;
-    this.userID = undefined;
-    this.auth0UserID = undefined;
+    this.auth0UserID = this.authStore.user?.id;
     this.userAgencies = undefined;
     this.userInfoLoaded = false;
     this.hasSeenOnboarding = true;
@@ -66,8 +59,72 @@ class UserStore {
 
     when(
       () => api.isSessionInitialized,
-      () => this.updateAndRetrieveUserInfo()
+      () => this.updateAndRetrieveUserPermissionsAndAgencies()
     );
+  }
+
+  async updateUserNameAndEmail(
+    name: string,
+    email: string
+  ): Promise<string | undefined> {
+    try {
+      const body: UserSettingsRequestBody = { name: null, email: null };
+      const isNameUpdated = name !== this.authStore.user?.name;
+      const isEmailUpdated = email !== this.authStore.user?.email;
+      if (isNameUpdated) {
+        body.name = name;
+      }
+      if (isEmailUpdated) {
+        body.email = email;
+      }
+      const response = await this.api.request({
+        path: "/api/users/update",
+        method: "POST",
+        body,
+      });
+      runInAction(() => {
+        this.authStore.user = { ...this.authStore.user, name, email };
+      });
+
+      if (response && response instanceof Response) {
+        if (response.status === 200 && isNameUpdated && !isEmailUpdated) {
+          showToast(`Name was successfully updated to ${name}.`, true);
+          return;
+        }
+        if (response.status === 200 && isNameUpdated && isEmailUpdated) {
+          showToast(
+            `Name and email were successfully updated. You will be logged out. Please check your email at ${email} to verify your new email before logging in again.`,
+            /* check  */ true,
+            /* color */ undefined,
+            /* timeout */ 4500
+          );
+          return;
+        }
+        if (response.status === 200 && !isNameUpdated && isEmailUpdated) {
+          showToast(
+            `Email was successfully updated. You will be logged out. Please check your email at ${email} to verify your new email before logging in again.`,
+            /* check  */ true,
+            /* color */ undefined,
+            /* timeout */ 4500
+          );
+          return;
+        }
+        if (response.status !== 200) {
+          showToast("Failed to update user details.", false, "red");
+          return;
+        }
+      }
+    } catch (error) {
+      let errorMessage = "";
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else {
+        errorMessage = String(error);
+      }
+
+      showToast(`Failed to update user details. ${errorMessage}`, false, "red");
+      return errorMessage;
+    }
   }
 
   getInitialAgencyId(): number | undefined {
@@ -77,6 +134,18 @@ class UserStore {
       return this.userAgencies[0].id;
     }
     return undefined;
+  }
+
+  get name(): string | undefined {
+    return this.authStore.user?.name;
+  }
+
+  get email(): string | undefined {
+    return this.authStore.user?.email;
+  }
+
+  get nameOrEmail(): string | undefined {
+    return this.name || this.email;
   }
 
   get currentAgency(): UserAgency | undefined {
@@ -91,47 +160,26 @@ class UserStore {
     });
   }
 
-  async updateAndRetrieveUserInfo() {
+  async updateAndRetrieveUserPermissionsAndAgencies() {
     try {
-      if (!this.authStore.user) {
-        Promise.reject(new Error("No user information exists."));
-      }
-
-      const { email, sub: auth0ID } = this.authStore.user as User;
-
       const response = (await this.api.request({
         path: "/api/users",
         method: "POST",
         body: {
-          email_address: email,
-          auth0_user_id: auth0ID,
+          name: this.name,
         },
       })) as Response;
-
       const {
-        name,
-        email_address: emailAddress,
-        id: userID,
-        auth0_user_id: auth0UserID,
         agencies: userAgencies,
         permissions,
         has_seen_onboarding: hasSeenOnboarding, // will be used in future
       } = await response.json();
-
       runInAction(() => {
-        this.name = name;
-        this.email = emailAddress;
-        this.nameOrEmail = name || emailAddress;
-        this.userID = userID;
-        this.auth0UserID = auth0UserID;
         this.userAgencies = userAgencies;
         this.permissions = permissions;
         this.hasSeenOnboarding = hasSeenOnboarding; // will be used in future
         this.currentAgencyId = this.getInitialAgencyId();
-
-        if (this.userID && this.userAgencies) {
-          this.userInfoLoaded = true;
-        }
+        this.userInfoLoaded = true;
       });
     } catch (error) {
       if (error instanceof Error) return error.message;

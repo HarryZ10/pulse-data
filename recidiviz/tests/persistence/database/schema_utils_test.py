@@ -82,6 +82,7 @@ def test_get_all_database_entity_classes() -> None:
         "StateAssessment",
         "StateCharge",
         "StateCourtCase",
+        "StateDrugScreen",
         "StateEmploymentPeriod",
         "StateEarlyDischarge",
         "StateIncarcerationIncident",
@@ -200,12 +201,15 @@ def test_get_all_table_classes() -> None:
     pathways_table_names = [
         "liberty_to_prison_transitions",
         "prison_to_supervision_transitions",
+        "supervision_to_liberty_transitions",
+        "supervision_to_prison_transitions",
     ]
     state_table_names = [
         "state_agent",
         "state_assessment",
         "state_charge",
         "state_court_case",
+        "state_drug_screen",
         "state_employment_period",
         "state_early_discharge",
         "state_incarceration_incident",
@@ -278,6 +282,7 @@ def test_get_state_database_entities() -> None:
         "StateAssessment",
         "StateCharge",
         "StateCourtCase",
+        "StateDrugScreen",
         "StateEmploymentPeriod",
         "StateEarlyDischarge",
         "StateIncarcerationIncident",

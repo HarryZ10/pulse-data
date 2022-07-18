@@ -23,6 +23,7 @@ from unittest import TestCase
 import pytest
 from sqlalchemy.engine import Engine
 
+from recidiviz.auth.auth0_client import Auth0User, JusticeCountsAuth0AppMetadata
 from recidiviz.common.constants.justice_counts import ContextKey
 from recidiviz.justice_counts.dimensions.law_enforcement import (
     CallType,
@@ -124,20 +125,27 @@ class JusticeCountsSchemaTestObjects:
             system=schema.System.PAROLE,
         )
 
+        # Auth0 Users
+        self.test_auth0_user: Auth0User = {
+            "email": "userA@fake.com",
+            "user_id": "auth0_id_A",
+            "name": "Jane Doe",
+            "app_metadata": JusticeCountsAuth0AppMetadata(
+                agency_ids=[], has_seen_onboarding={}
+            ),
+        }
+
         # Users
         self.test_user_A = schema.UserAccount(
             name="Jane Doe",
             auth0_user_id="auth0_id_A",
-            email_address="user@gmail.com",
         )
         self.test_user_B = schema.UserAccount(
             name="John Doe",
-            email_address="user@email.gov",
             auth0_user_id="auth0_id_B",
         )
         self.test_user_C = schema.UserAccount(
             name="John Smith",
-            email_address="user@fake.com",
             auth0_user_id="auth0_id_C",
         )
 

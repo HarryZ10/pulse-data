@@ -37,10 +37,7 @@ from recidiviz.persistence.database.sqlalchemy_database_key import SQLAlchemyDat
 from recidiviz.persistence.database.sqlalchemy_engine_manager import (
     SQLAlchemyEngineManager,
 )
-from recidiviz.server_blueprint_registry import (
-    default_blueprints_with_url_prefixes,
-    scraper_blueprints_with_url_prefixes,
-)
+from recidiviz.server_blueprint_registry import default_blueprints_with_url_prefixes
 from recidiviz.server_config import database_keys_for_schema_type
 from recidiviz.utils import environment, metadata, monitoring, structured_logging, trace
 
@@ -52,10 +49,7 @@ app = Flask(__name__)
 
 service_type = environment.get_service_type()
 
-if service_type is environment.ServiceType.SCRAPERS:
-    for blueprint, url_prefix in scraper_blueprints_with_url_prefixes:
-        app.register_blueprint(blueprint, url_prefix=url_prefix)
-elif service_type is environment.ServiceType.DEFAULT:
+if service_type is environment.ServiceType.DEFAULT:
     for blueprint, url_prefix in default_blueprints_with_url_prefixes:
         app.register_blueprint(blueprint, url_prefix=url_prefix)
 else:
@@ -100,15 +94,16 @@ config_integration.trace_integrations(
     ]
 )
 if environment.in_development():
-    # We can connect to the justice counts / case triage database using the default `init_engine` configurations,
-    # which uses secrets in `recidiviz/local`. If you are missing these secrets, run these scripts:
-    # ./recidiviz/tools/case_triage/initialize_development_environment.sh
-    # ./recidiviz/tools/justice_counts/control_panel/initialize_development_environment.sh
+    # We can connect to the development versions of our databases database using the
+    # default `init_engine` configurations, which uses secrets in `recidiviz/local`. If
+    # you are missing these secrets, run this script:
+    # ./recidiviz/tools/admin_panel/initialize_development_environment.sh
 
     # If we fail to connect a message will be logged but we won't raise an error.
     enabled_development_schema_types = [
         SchemaType.CASE_TRIAGE,
         SchemaType.JUSTICE_COUNTS,
+        SchemaType.OPERATIONS,
     ]
 
     for schema_type in enabled_development_schema_types:
@@ -129,9 +124,7 @@ elif environment.in_gcp():
     # be logged and not raise an error, so that a single database outage doesn't take
     # down the entire application. Any attempt to use those databases later will
     # attempt to connect again in case the database was just unhealthy.
-    if service_type is environment.ServiceType.SCRAPERS:
-        schemas = {SchemaType.JAILS}
-    elif service_type is environment.ServiceType.DEFAULT:
+    if service_type is environment.ServiceType.DEFAULT:
         schemas = set(SchemaType) - {SchemaType.JAILS}
     else:
         raise ValueError(f"Unsupported service type: {service_type}")

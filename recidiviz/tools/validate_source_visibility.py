@@ -270,6 +270,7 @@ def main() -> int:
         valid_module_prefixes=make_module_matcher(
             {
                 "recidiviz.airflow",
+                "recidiviz.cloud_functions.cloud_function_utils",
             }
         ),
     )
@@ -341,8 +342,7 @@ def main() -> int:
                 "recidiviz.common",
                 "recidiviz.persistence",
                 "recidiviz.utils",
-                "recidiviz.reporting",
-                "recidiviz.cloud_storage",
+                "recidiviz.auth",
             }
         ),
     )

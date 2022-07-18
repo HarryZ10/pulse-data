@@ -15,6 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // =============================================================================
 
+import { debounce, memoize } from "lodash";
+
 import { MetricContext } from "../shared/types";
 
 /**
@@ -66,10 +68,8 @@ export const combineTwoKeyNames = (
  * @example "   1,000,00  0 " becomes "1000000"
  */
 
-export const removeCommaSpaceAndTrim = (
-  value: string | undefined
-): string | undefined => {
-  return value?.replaceAll(",", "").replaceAll(" ", "").trim();
+export const removeCommaSpaceAndTrim = (string: string) => {
+  return string?.replaceAll(",", "").replaceAll(" ", "").trim();
 };
 
 /**
@@ -87,7 +87,7 @@ export const formatNumberInput = (
   }
 
   const maxNumber = 999_999_999_999_999; // 1 quadrillion
-  const cleanValue = removeCommaSpaceAndTrim(value) as string;
+  const cleanValue = removeCommaSpaceAndTrim(value);
   const splitValues = cleanValue.split(".");
 
   if (Number(cleanValue) > maxNumber) {
@@ -129,11 +129,10 @@ export const sanitizeInputValue = (
   previousValue: string | number | boolean | null | undefined,
   type?: MetricContext["type"]
 ): string | number | boolean | null | undefined => {
-  const cleanValue = removeCommaSpaceAndTrim(value);
-
   if (value === undefined) {
     return previousValue;
   }
+  const cleanValue = removeCommaSpaceAndTrim(value);
   if (cleanValue === "") {
     return null;
   }
@@ -164,6 +163,7 @@ export const normalizeToString = (
  * @param key name of the property on which to perform the grouping
  * @returns dictionary of property value to list of objects with that value
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const groupBy = <T, K extends keyof any>(arr: T[], key: (i: T) => K) => {
   const result = {} as Record<K, T[]>;
   arr.forEach((item) => {
@@ -174,3 +174,45 @@ export const groupBy = <T, K extends keyof any>(arr: T[], key: (i: T) => K) => {
   });
   return result;
 };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface MemoizeDebouncedFunction<F extends (...args: any[]) => any> {
+  (...args: Parameters<F>): void;
+  flush: (...args: Parameters<F>) => void;
+}
+
+/**
+ * This method should be used instead of the standard `debounce` if we want to
+ * debounce *only* if the arguments to the function are the same.
+ * For instance, consider a function `click(param: str)`. With standard debounce,
+ * calling `click('foo')` and `click('bar')` in quick succession will only result
+ * in the execution of `click('bar')`. However, using memoized debounce, both
+ * functions will execute, because their parameters are different.
+ * Taken from https://github.com/lodash/lodash/issues/2403#issuecomment-816137402
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function memoizeDebounce<F extends (...args: any[]) => any>(
+  func: F,
+  wait = 0,
+  options: _.DebounceSettings = {},
+  resolver?: (...args: Parameters<F>) => unknown
+): MemoizeDebouncedFunction<F> {
+  const debounceMemo = memoize<(...args: Parameters<F>) => _.DebouncedFunc<F>>(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    (..._args: Parameters<F>) => debounce(func, wait, options),
+    resolver
+  );
+
+  function wrappedFunction(
+    this: MemoizeDebouncedFunction<F>,
+    ...args: Parameters<F>
+  ): ReturnType<F> | undefined {
+    return debounceMemo(...args)(...args);
+  }
+
+  wrappedFunction.flush = (...args: Parameters<F>): void => {
+    debounceMemo(...args).flush();
+  };
+
+  return wrappedFunction as unknown as MemoizeDebouncedFunction<F>;
+}

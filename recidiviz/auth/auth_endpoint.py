@@ -26,7 +26,7 @@ import sqlalchemy.orm.exc
 from flask import Blueprint, request
 from sqlalchemy import func
 
-from recidiviz.auth.auth0_client import Auth0AppMetadata
+from recidiviz.auth.auth0_client import CaseTriageAuth0AppMetadata
 from recidiviz.calculator.query.state.views.reference.dashboard_user_restrictions import (
     DASHBOARD_USER_RESTRICTIONS_VIEW_BUILDER,
 )
@@ -52,21 +52,40 @@ from recidiviz.reporting.email_reporting_utils import validate_email_address
 from recidiviz.utils import metadata
 from recidiviz.utils.auth.gae import requires_gae_auth
 from recidiviz.utils.params import get_only_str_param_value
+from recidiviz.utils.pubsub_helper import OBJECT_ID, extract_pubsub_message_from_json
 from recidiviz.utils.string import StrictStringFormatter
 
 auth_endpoint_blueprint = Blueprint("auth_endpoint_blueprint", __name__)
 
 
 @auth_endpoint_blueprint.route(
-    "/handle_import_user_restrictions_csv_to_sql", methods=["GET"]
+    "/handle_import_user_restrictions_csv_to_sql", methods=["POST"]
 )
 @requires_gae_auth
 def handle_import_user_restrictions_csv_to_sql() -> Tuple[str, HTTPStatus]:
-    region_code = get_only_str_param_value(
-        "region_code", request.args, preserve_case=True
-    )
+    """Called from a Cloud Storage Notification when a new file is created in the user restrictions
+    bucket. It enqueues a task to import the file into Cloud SQL."""
+    try:
+        message = extract_pubsub_message_from_json(request.get_json())
+    except Exception as e:
+        return str(e), HTTPStatus.BAD_REQUEST
+
+    if not message.attributes:
+        return "Invalid Pub/Sub message", HTTPStatus.BAD_REQUEST
+
+    attributes = message.attributes
+    region_code, filename = os.path.split(attributes[OBJECT_ID])
+
     if not region_code:
-        return "Missing region_code param", HTTPStatus.BAD_REQUEST
+        logging.info("Missing region, ignoring")
+        return "", HTTPStatus.OK
+
+    # It would be nice if we could do this as a filter in the GCS notification instead of as logic
+    # here, but as of June 2022, the available filters are not expressive enough for our needs:
+    # https://cloud.google.com/pubsub/docs/filtering#filtering_syntax
+    if filename != "dashboard_user_restrictions.csv":
+        logging.info("Unknown filename %s, ignoring", filename)
+        return "", HTTPStatus.OK
 
     cloud_task_manager = CloudTaskQueueManager(
         queue_info_cls=CloudTaskQueueInfo, queue_name=CASE_TRIAGE_DB_OPERATIONS_QUEUE
@@ -140,7 +159,7 @@ def import_user_restrictions_csv_to_sql() -> Tuple[str, HTTPStatus]:
 @auth_endpoint_blueprint.route("/dashboard_user_restrictions_by_email", methods=["GET"])
 @requires_gae_auth
 def dashboard_user_restrictions_by_email() -> Tuple[
-    Union[Auth0AppMetadata, str], HTTPStatus
+    Union[CaseTriageAuth0AppMetadata, str], HTTPStatus
 ]:
     """This endpoint is accessed by a service account used by an Auth0 hook that is called at the pre-registration when
     a user first signs up for an account. Given a user email address in the request, it responds with
@@ -219,7 +238,7 @@ def dashboard_user_restrictions_by_email() -> Tuple[
 
 def _format_db_results(
     user_restrictions: Dict[str, Any],
-) -> Auth0AppMetadata:
+) -> CaseTriageAuth0AppMetadata:
     return {
         "allowed_supervision_location_ids": _format_allowed_supervision_location_ids(
             user_restrictions["allowed_supervision_location_ids"]

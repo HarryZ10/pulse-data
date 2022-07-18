@@ -31,7 +31,7 @@ from recidiviz.big_query.big_query_results_contents_handle import (
 from recidiviz.cloud_storage.gcs_pseudo_lock_manager import GCSPseudoLockAlreadyExists
 from recidiviz.cloud_storage.gcsfs_csv_reader import GcsfsCsvReader
 from recidiviz.cloud_storage.gcsfs_factory import GcsfsFactory
-from recidiviz.cloud_storage.gcsfs_path import GcsfsBucketPath, GcsfsFilePath
+from recidiviz.cloud_storage.gcsfs_path import GcsfsFilePath
 from recidiviz.common.constants.states import StateCode
 from recidiviz.common.ingest_metadata import (
     IngestMetadata,
@@ -59,6 +59,7 @@ from recidiviz.ingest.direct.gcs.direct_ingest_gcs_file_system import (
     DirectIngestGCSFileSystem,
 )
 from recidiviz.ingest.direct.gcs.directory_path_utils import (
+    gcsfs_direct_ingest_bucket_for_state,
     gcsfs_direct_ingest_storage_directory_path_for_state,
     gcsfs_direct_ingest_temporary_output_directory_path,
 )
@@ -101,9 +102,6 @@ from recidiviz.ingest.direct.types.cloud_task_args import (
     IngestViewMaterializationArgs,
 )
 from recidiviz.ingest.direct.types.direct_ingest_instance import DirectIngestInstance
-from recidiviz.ingest.direct.types.direct_ingest_instance_factory import (
-    DirectIngestInstanceFactory,
-)
 from recidiviz.ingest.direct.types.errors import (
     DirectIngestError,
     DirectIngestErrorType,
@@ -123,7 +121,7 @@ class BaseDirectIngestController:
 
     def __init__(
         self,
-        ingest_bucket_path: GcsfsBucketPath,
+        ingest_instance: DirectIngestInstance,
         region_module_override: Optional[ModuleType] = None,
     ) -> None:
         """Initialize the controller."""
@@ -137,20 +135,28 @@ class BaseDirectIngestController:
 
         self.system_level = SystemLevel.STATE
         self.cloud_task_manager = DirectIngestCloudTaskManagerImpl()
-        self.ingest_instance = DirectIngestInstanceFactory.for_ingest_bucket(
-            ingest_bucket_path
-        )
+        self.ingest_instance = ingest_instance
         self.region_lock_manager = DirectIngestRegionLockManager.for_direct_ingest(
             region_code=self.region.region_code,
             schema_type=self.system_level.schema_type(),
             ingest_instance=self.ingest_instance,
         )
         self.fs = DirectIngestGCSFileSystem(GcsfsFactory.build())
-        self.ingest_bucket_path = ingest_bucket_path
-        self.storage_directory_path = (
+        self.instance_bucket_path = gcsfs_direct_ingest_bucket_for_state(
+            region_code=self.region.region_code, ingest_instance=self.ingest_instance
+        )
+        # TODO(#12794): This will have to change based on which instance is the raw data
+        #  source instance.
+        raw_data_source_instance = DirectIngestInstance.PRIMARY
+
+        self.raw_data_bucket_path = gcsfs_direct_ingest_bucket_for_state(
+            region_code=self.region.region_code,
+            ingest_instance=raw_data_source_instance,
+        )
+        self.raw_data_storage_directory_path = (
             gcsfs_direct_ingest_storage_directory_path_for_state(
                 region_code=self.region_code(),
-                ingest_instance=self.ingest_instance,
+                ingest_instance=raw_data_source_instance,
             )
         )
 
@@ -160,8 +166,8 @@ class BaseDirectIngestController:
 
         self.raw_file_metadata_manager = PostgresDirectIngestRawFileMetadataManager(
             region_code=self.region.region_code,
-            # TODO(#12794): Change to be based on the instance the raw file is processed in once we can ingest in
-            # multiple instances.
+            # TODO(#12794): Change to be based on the instance the raw file is
+            #  processed in once we can import data from both PRIMARY and SECONDARY.
             raw_data_instance=DirectIngestInstance.PRIMARY,
         )
 
@@ -260,7 +266,7 @@ class BaseDirectIngestController:
         logging.info("Creating cloud task to schedule next job.")
         self.cloud_task_manager.create_direct_ingest_scheduler_queue_task(
             region=self.region,
-            ingest_bucket=self.ingest_bucket_path,
+            ingest_instance=self.ingest_instance,
             just_finished_job=just_finished_job,
         )
 
@@ -314,7 +320,7 @@ class BaseDirectIngestController:
 
         if self.ingest_instance_status_manager.is_instance_paused():
             logging.info(
-                "Ingest out of [%s] is currently paused.", self.ingest_bucket_path.uri()
+                "Ingest out of [%s] is currently paused.", self.ingest_instance
             )
             return
 
@@ -405,7 +411,7 @@ class BaseDirectIngestController:
 
         for raw_file_metadata in raw_files_pending_import:
             raw_data_file_path = GcsfsFilePath.from_directory_and_file_name(
-                self.ingest_bucket_path, raw_file_metadata.normalized_file_name
+                self.raw_data_bucket_path, raw_file_metadata.normalized_file_name
             )
             is_unrecognized_tag = (
                 raw_file_metadata.file_tag
@@ -502,7 +508,7 @@ class BaseDirectIngestController:
 
         if self.ingest_instance_status_manager.is_instance_paused():
             logging.info(
-                "Ingest out of [%s] is currently paused.", self.ingest_bucket_path.uri()
+                "Ingest out of [%s] is currently paused.", self.ingest_instance
             )
             return
 
@@ -703,7 +709,7 @@ class BaseDirectIngestController:
         logging.info("Creating cloud task to schedule next job.")
         self.cloud_task_manager.create_direct_ingest_handle_new_files_task(
             region=self.region,
-            ingest_bucket=self.ingest_bucket_path,
+            ingest_instance=self.ingest_instance,
             can_start_ingest=start_ingest,
         )
 
@@ -731,14 +737,14 @@ class BaseDirectIngestController:
 
         if self.ingest_instance_status_manager.is_instance_paused():
             logging.info(
-                "Ingest out of [%s] is currently paused.", self.ingest_bucket_path.uri()
+                "Ingest out of [%s] is currently paused.", self.ingest_instance
             )
             return
 
         self._prune_redundant_tasks(current_task_id=current_task_id)
 
         unnormalized_paths = self.fs.get_unnormalized_file_paths(
-            self.ingest_bucket_path
+            self.instance_bucket_path
         )
 
         for path in unnormalized_paths:
@@ -763,7 +769,7 @@ class BaseDirectIngestController:
         check_is_region_launched_in_env(self.region)
 
         unprocessed_raw_paths = self.fs.get_unprocessed_raw_file_paths(
-            self.ingest_bucket_path
+            self.instance_bucket_path
         )
         if (
             unprocessed_raw_paths
@@ -771,7 +777,7 @@ class BaseDirectIngestController:
         ):
             raise ValueError(
                 f"Raw data import not supported from SECONDARY ingest bucket "
-                f"[{self.ingest_bucket_path}], but found {len(unprocessed_raw_paths)} "
+                f"[{self.instance_bucket_path}], but found {len(unprocessed_raw_paths)} "
                 f"raw files. All raw files should be removed from this bucket and "
                 f"uploaded to the primary ingest bucket, if appropriate."
             )
@@ -790,16 +796,15 @@ class BaseDirectIngestController:
 
         if self.ingest_instance_status_manager.is_instance_paused():
             logging.info(
-                "Ingest out of [%s] is currently paused.", self.ingest_bucket_path.uri()
+                "Ingest out of [%s] is currently paused.", self.ingest_instance
             )
             return
 
         if self.ingest_instance == DirectIngestInstance.SECONDARY:
             raise ValueError(
-                f"Raw data import not supported from SECONDARY ingest bucket "
-                f"[{self.ingest_bucket_path}]. Raw data task for "
-                f"[{data_import_args.raw_data_file_path}] should never have been "
-                f"scheduled."
+                f"Raw data import not supported from the SECONDARY instance. Raw "
+                f"data task for [{data_import_args.raw_data_file_path}] should never "
+                f"have been scheduled."
             )
 
         try:
@@ -854,7 +859,9 @@ class BaseDirectIngestController:
             data_import_args.raw_data_file_path
         )
 
-        self.fs.mv_raw_file_to_storage(processed_path, self.storage_directory_path)
+        self.fs.mv_raw_file_to_storage(
+            processed_path, self.raw_data_storage_directory_path
+        )
         self.kick_scheduler(just_finished_job=True)
 
     def do_ingest_view_materialization(
@@ -864,7 +871,7 @@ class BaseDirectIngestController:
 
         if self.ingest_instance_status_manager.is_instance_paused():
             logging.info(
-                "Ingest out of [%s] is currently paused.", self.ingest_bucket_path.uri()
+                "Ingest out of [%s] is currently paused.", self.ingest_instance
             )
             return
 
@@ -879,7 +886,7 @@ class BaseDirectIngestController:
             logging.info("Creating cloud task to schedule next job.")
             self.cloud_task_manager.create_direct_ingest_handle_new_files_task(
                 region=self.region,
-                ingest_bucket=self.ingest_bucket_path,
+                ingest_instance=self.ingest_instance,
                 can_start_ingest=True,
             )
 
